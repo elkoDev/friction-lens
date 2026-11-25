@@ -1,0 +1,251 @@
+{
+  "schemaVersion": "1.0",
+  "workspaces": {
+    "devtools": {
+      "domainCategory": "B2B Developer Tools & Cloud Infrastructure",
+      "entities": [
+        { "name": "Supabase", "aliases": "supabase" },
+        { "name": "Firebase", "aliases": "firestore,firebase" },
+        { "name": "Neon", "aliases": "neon.tech,neondb" }
+      ]
+    },
+    "cochlear": {
+      "domainCategory": "High-Consideration Hardware & Assistive Devices",
+      "entities": [
+        { "name": "Advanced Bionics", "aliases": "AB,Advanced Bionics" },
+        { "name": "MED-EL", "aliases": "Med-el,MEDEL,Medel" },
+        { "name": "Cochlear", "aliases": "Nucleus,Cochlear Ltd" }
+      ]
+    },
+    "saas_crm": {
+      "domainCategory": "B2B SaaS CRM & Support",
+      "entities": [
+        { "name": "HubSpot", "aliases": "hubspot" },
+        { "name": "Salesforce", "aliases": "SFDC,salesforce" },
+        { "name": "Attio", "aliases": "attio" }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": "dev-pos-01",
+      "workspace": "devtools",
+      "sourceType": "HackerNews",
+      "bucket": "positive_switch",
+      "title": "Migrating off Firebase to Postgres",
+      "body": "We switched to Supabase from Firebase because Firestore vendor lock-in made reporting painful and we needed real Postgres SQL plus self-hosting.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "Supabase",
+      "expectedCanonicalTheme": "vendor_lock_in"
+    },
+    {
+      "id": "dev-pos-02",
+      "workspace": "devtools",
+      "sourceType": "HackerNews",
+      "bucket": "positive_switch",
+      "title": "CI database branching comparison",
+      "body": "Ended up choosing Neon over Supabase for our CI pipeline because instant database branching per PR is unbeatable, even if cold start latency occasionally bites.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "Neon",
+      "expectedCanonicalTheme": "sql_and_branching"
+    },
+    {
+      "id": "dev-pos-03",
+      "workspace": "devtools",
+      "sourceType": "GitHub",
+      "bucket": "positive_friction",
+      "title": "Unexpected Firestore billing spike",
+      "body": "Our biggest dealbreaker with Firebase was an unexpected $1,400 weekend bill shock from a Firestore read loop with no hard spending cap.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "Firebase",
+      "expectedCanonicalTheme": "pricing_predictability"
+    },
+    {
+      "id": "dev-pos-04",
+      "workspace": "devtools",
+      "sourceType": "HackerNews",
+      "bucket": "positive_switch",
+      "title": "Neon vs Supabase cold starts",
+      "body": "We went with Supabase over Neon because wake from idle latency caused timeouts on our customer checkout API.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "Supabase",
+      "expectedCanonicalTheme": "reliability_and_latency"
+    },
+    {
+      "id": "dev-pos-05",
+      "workspace": "devtools",
+      "sourceType": "Discourse",
+      "bucket": "positive_switch",
+      "title": "Local dev experience matters",
+      "body": "Our team picked Supabase instead of Firebase mainly because local development with Docker and Postgres migrations was so much cleaner.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "Supabase",
+      "expectedCanonicalTheme": "self_hosting_and_local_dev"
+    },
+    {
+      "id": "coch-pos-01",
+      "workspace": "cochlear",
+      "sourceType": "ManualPaste",
+      "bucket": "positive_switch",
+      "title": "Choice between MED-EL and AB",
+      "body": "Had the choice between MED-EL and AB. AB had the bluetooth and AB offered remote programming. If I went with Med-el it would be a 7h drive one way.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "Advanced Bionics",
+      "expectedCanonicalTheme": "remote_programming"
+    },
+    {
+      "id": "coch-pos-02",
+      "workspace": "cochlear",
+      "sourceType": "ManualPaste",
+      "bucket": "positive_synonym",
+      "title": "Tele-audiology tiebreaker",
+      "body": "We chose Advanced Bionics over MED-EL because tele-audiology saved us a 5 hours drive to the regional clinic every quarter.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "Advanced Bionics",
+      "expectedCanonicalTheme": "remote_programming"
+    },
+    {
+      "id": "coch-pos-03",
+      "workspace": "cochlear",
+      "sourceType": "ManualPaste",
+      "bucket": "positive_switch",
+      "title": "Warranty turnaround comparison",
+      "body": "We went with Cochlear over AB primarily because our local audiologist stocked spare parts and warranty replacement took 24 hours instead of a week.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "Cochlear",
+      "expectedCanonicalTheme": "customer_support_speed"
+    },
+    {
+      "id": "coch-pos-04",
+      "workspace": "cochlear",
+      "sourceType": "ManualPaste",
+      "bucket": "positive_synonym",
+      "title": "Remote fitting vs travel",
+      "body": "I picked Advanced Bionics instead of MED-EL because remote fitting eliminated the long drive to our clinic.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "Advanced Bionics",
+      "expectedCanonicalTheme": "remote_programming"
+    },
+    {
+      "id": "crm-pos-01",
+      "workspace": "saas_crm",
+      "sourceType": "HackerNews",
+      "bucket": "positive_switch",
+      "title": "Ditching Salesforce for Attio",
+      "body": "Our sales team migrated to Attio from Salesforce because SFDC enterprise tier seat pricing and painful setup were dealbreakers.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "Attio",
+      "expectedCanonicalTheme": "pricing_predictability"
+    },
+    {
+      "id": "crm-pos-02",
+      "workspace": "saas_crm",
+      "sourceType": "HackerNews",
+      "bucket": "positive_switch",
+      "title": "HubSpot pricing cliff",
+      "body": "We switched to Attio from HubSpot after hitting a massive pricing cliff when we needed custom reporting and SSO.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "Attio",
+      "expectedCanonicalTheme": "pricing_predictability"
+    },
+    {
+      "id": "crm-pos-03",
+      "workspace": "saas_crm",
+      "sourceType": "Discourse",
+      "bucket": "positive_switch",
+      "title": "Moving off HubSpot",
+      "body": "We chose HubSpot over Salesforce for our 40-person team because Salesforce onboarding and documentation were way too slow.",
+      "expectedPassPipeline": true,
+      "expectedPrimaryEntity": "HubSpot",
+      "expectedCanonicalTheme": "dx_and_documentation"
+    },
+    {
+      "id": "neg-01",
+      "workspace": "devtools",
+      "sourceType": "HackerNews",
+      "bucket": "hard_negative",
+      "title": "Who is hiring (November 2026)",
+      "body": "Who is hiring: Acme Corp is looking for a full-stack engineer who knows Supabase, React, and TypeScript. Apply here!",
+      "expectedPassPipeline": false,
+      "expectedPrimaryEntity": null,
+      "expectedCanonicalTheme": null
+    },
+    {
+      "id": "neg-02",
+      "workspace": "devtools",
+      "sourceType": "HackerNews",
+      "bucket": "hard_negative",
+      "title": "Short chatter",
+      "body": "Supabase is cool lol",
+      "expectedPassPipeline": false,
+      "expectedPrimaryEntity": null,
+      "expectedCanonicalTheme": null
+    },
+    {
+      "id": "neg-03",
+      "workspace": "devtools",
+      "sourceType": "GitHub",
+      "bucket": "hard_negative",
+      "title": "How to question",
+      "body": "How do I connect Supabase client to a Next.js server component using the new cookies helper?",
+      "expectedPassPipeline": false,
+      "expectedPrimaryEntity": null,
+      "expectedCanonicalTheme": null
+    },
+    {
+      "id": "neg-04",
+      "workspace": "cochlear",
+      "sourceType": "HackerNews",
+      "bucket": "hard_negative",
+      "title": "A/B testing blog post",
+      "body": "We ran an a/b test on our checkout button color and saw a 2% conversion lift across mobile visitors.",
+      "expectedPassPipeline": false,
+      "expectedPrimaryEntity": null,
+      "expectedCanonicalTheme": null
+    },
+    {
+      "id": "neg-05",
+      "workspace": "saas_crm",
+      "sourceType": "HackerNews",
+      "bucket": "hard_negative",
+      "title": "Release notes announcement",
+      "body": "Just released HubSpot SDK v4.2! Full changelog and release notes are available on our developer portal.",
+      "expectedPassPipeline": false,
+      "expectedPrimaryEntity": null,
+      "expectedCanonicalTheme": null
+    },
+    {
+      "id": "neg-06",
+      "workspace": "devtools",
+      "sourceType": "HackerNews",
+      "bucket": "hard_negative",
+      "title": "Entity only in URL",
+      "body": "Check out this cool tutorial I found at https://supabase.com/docs/guides/getting-started for learning web dev.",
+      "expectedPassPipeline": false,
+      "expectedPrimaryEntity": null,
+      "expectedCanonicalTheme": null
+    },
+    {
+      "id": "neg-07",
+      "workspace": "saas_crm",
+      "sourceType": "HackerNews",
+      "bucket": "hard_negative",
+      "title": "Quarterly earnings",
+      "body": "Salesforce quarterly earnings beat Wall Street estimates and stock price jumped 4% in after-hours trading.",
+      "expectedPassPipeline": false,
+      "expectedPrimaryEntity": null,
+      "expectedCanonicalTheme": null
+    },
+    {
+      "id": "neg-08",
+      "workspace": "devtools",
+      "sourceType": "HackerNews",
+      "bucket": "hard_negative",
+      "title": "Neutral question",
+      "body": "Is there a tutorial for deploying Neon with Drizzle ORM on Cloudflare Workers?",
+      "expectedPassPipeline": false,
+      "expectedPrimaryEntity": null,
+      "expectedCanonicalTheme": null
+    }
+  ]
+}

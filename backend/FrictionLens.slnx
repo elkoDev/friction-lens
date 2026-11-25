@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FrictionLens.Api/FrictionLens.Api.csproj" />
+  </Folder>
+</Solution>

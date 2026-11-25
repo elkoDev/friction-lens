@@ -1,0 +1,14 @@
+# .NET
+bin/
+obj/
+*.db
+*.db-shm
+*.db-wal
+.vs/
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+.env
+.env.local
+*.log
