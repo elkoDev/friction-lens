@@ -8,11 +8,14 @@ namespace FrictionLens.Api.Extraction;
 public sealed record ResolvedTheme(Guid ThemeId, string Slug, string DisplayLabel, string Method);
 
 /// <summary>
-/// Phase 1 Canonical Taxonomy Resolver: collapses synonym phrases
-/// (e.g., "tele-audiology" == "remote fitting" == "remote programming")
-/// using workspace alias dictionaries + normalized stem/token Jaccard matching.
+/// Phase 2 Canonical Taxonomy Resolver:
+/// 1) Built-in & Domain Pack alias seeds -> 2) Exact slug -> 3) Workspace alias dict
+/// -> 4) SIMD Cosine Similarity embedding match -> 5) HITL Merge/Rename/Suggestions.
 /// </summary>
-public sealed partial class CanonicalTaxonomyResolver(AppDbContext db)
+public sealed partial class CanonicalTaxonomyResolver(
+    AppDbContext db,
+    IEmbeddingProvider embeddingProvider,
+    HashEmbeddingProvider fallbackEmbedder)
 {
     private static readonly Dictionary<string, (string Slug, string Label, DriverCategory Category)> BuiltInSynonymSeeds = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -42,6 +45,38 @@ public sealed partial class CanonicalTaxonomyResolver(AppDbContext db)
         ["clinic commute"] = ("clinic_travel_distance", "Clinic Travel Distance", DriverCategory.LogisticsAccess),
     };
 
+    public async Task SeedDomainPackThemesAsync(Workspace workspace, DomainPackDto pack, CancellationToken ct)
+    {
+        foreach (var seed in pack.SeedThemes)
+        {
+            var embedText = $"{seed.DisplayLabel} ({seed.Category}): {string.Join(", ", seed.Synonyms)}";
+            var vec = await EmbedSafeAsync(embedText, ct);
+
+            var theme = new CanonicalThemeRecord
+            {
+                Workspace = workspace,
+                Slug = seed.Slug,
+                DisplayLabel = seed.DisplayLabel,
+                Category = seed.Category,
+                EmbeddingBlob = VectorMath.Pack(vec),
+                EmbeddingModel = embeddingProvider.ModelName
+            };
+
+            foreach (var syn in seed.Synonyms.Select(NormalizePhrase).Distinct())
+            {
+                theme.Aliases.Add(new ThemeAlias
+                {
+                    WorkspaceId = workspace.Id,
+                    CanonicalTheme = theme,
+                    NormalizedPhrase = syn,
+                    Source = $"DomainPack:{pack.PackId}"
+                });
+            }
+
+            workspace.CanonicalThemes.Add(theme);
+        }
+    }
+
     public async Task<ResolvedTheme> ResolveAsync(
         Guid workspaceId,
         ExtractedDriver driver,
@@ -51,7 +86,6 @@ public sealed partial class CanonicalTaxonomyResolver(AppDbContext db)
         var normalizedPhrase = NormalizePhrase(string.IsNullOrWhiteSpace(driver.RawPhrase) ? driver.DisplayLabel : driver.RawPhrase);
         var normalizedLabel = NormalizePhrase(driver.DisplayLabel);
 
-        // Check built-in domain-agnostic synonym seeds first
         if (TryMatchBuiltInSeed(normalizedPhrase, normalizedLabel, out var seed))
         {
             rawSlug = seed.Slug;
@@ -62,7 +96,7 @@ public sealed partial class CanonicalTaxonomyResolver(AppDbContext db)
             .Where(t => t.WorkspaceId == workspaceId)
             .ToListAsync(ct);
 
-        // Step 1: Exact slug match (follow merge pointer if merged)
+        // Step 1: Exact slug match (follows MergedIntoThemeId redirect chain)
         var exact = existingThemes.FirstOrDefault(t => t.Slug == rawSlug);
         if (exact is not null)
         {
@@ -81,30 +115,37 @@ public sealed partial class CanonicalTaxonomyResolver(AppDbContext db)
             }
         }
 
-        // Step 3: Normalized Stem Token Jaccard within same category
-        var candidateTokens = StemTokens($"{driver.DisplayLabel} {driver.RawPhrase}");
-        CanonicalThemeRecord? bestTheme = null;
-        double bestScore = 0.0;
+        // Step 3: Embedding Cosine Similarity (SIMD TensorPrimitives)
+        var candidateVec = await EmbedSafeAsync($"{driver.DisplayLabel} ({driver.Category}): {driver.RawPhrase}", ct);
+        CanonicalThemeRecord? bestEmbedTheme = null;
+        float bestCos = 0f;
 
-        foreach (var theme in existingThemes.Where(t => t.MergedIntoThemeId == null && t.Category == driver.Category))
+        foreach (var theme in existingThemes.Where(t => t.MergedIntoThemeId == null))
         {
-            var themeText = $"{theme.DisplayLabel} {string.Join(' ', theme.Aliases.Select(a => a.NormalizedPhrase))}";
-            var themeTokens = StemTokens(themeText);
-            var jaccard = TokenJaccard(candidateTokens, themeTokens);
-            if (jaccard > bestScore)
+            var themeVec = VectorMath.Unpack(theme.EmbeddingBlob);
+            if (themeVec.Length == 0)
             {
-                bestScore = jaccard;
-                bestTheme = theme;
+                themeVec = await EmbedSafeAsync($"{theme.DisplayLabel} ({theme.Category}): {string.Join(", ", theme.Aliases.Select(a => a.NormalizedPhrase))}", ct);
+                theme.EmbeddingBlob = VectorMath.Pack(themeVec);
+                theme.EmbeddingModel = embeddingProvider.ModelName;
+            }
+
+            if (themeVec.Length != candidateVec.Length) continue;
+            var cos = VectorMath.CosineSimilarity(candidateVec, themeVec);
+            if (cos > bestCos)
+            {
+                bestCos = cos;
+                bestEmbedTheme = theme;
             }
         }
 
-        if (bestTheme is not null && bestScore >= 0.60)
+        if (bestEmbedTheme is not null && bestCos >= 0.88f)
         {
-            EnsureAlias(workspaceId, bestTheme, normalizedPhrase);
-            return new ResolvedTheme(bestTheme.Id, bestTheme.Slug, bestTheme.DisplayLabel, "StemOverlap");
+            EnsureAlias(workspaceId, bestEmbedTheme, normalizedPhrase);
+            return new ResolvedTheme(bestEmbedTheme.Id, bestEmbedTheme.Slug, bestEmbedTheme.DisplayLabel, "EmbeddingAuto");
         }
 
-        // Step 4: Mint new CanonicalThemeRecord + alias
+        // Step 4: Mint new CanonicalThemeRecord + store embedding vector
         var label = TryMatchBuiltInSeed(normalizedPhrase, normalizedLabel, out var seedInfo)
             ? seedInfo.Label
             : driver.DisplayLabel;
@@ -114,7 +155,9 @@ public sealed partial class CanonicalTaxonomyResolver(AppDbContext db)
             WorkspaceId = workspaceId,
             Slug = rawSlug,
             DisplayLabel = label,
-            Category = driver.Category
+            Category = driver.Category,
+            EmbeddingBlob = VectorMath.Pack(candidateVec),
+            EmbeddingModel = embeddingProvider.ModelName
         };
 
         if (!string.IsNullOrWhiteSpace(normalizedPhrase))
@@ -130,6 +173,156 @@ public sealed partial class CanonicalTaxonomyResolver(AppDbContext db)
 
         db.CanonicalThemes.Add(created);
         return new ResolvedTheme(created.Id, created.Slug, created.DisplayLabel, "NewTheme");
+    }
+
+    public async Task<IReadOnlyList<MergeSuggestionDto>> FindMergeSuggestionsAsync(Guid workspaceId, CancellationToken ct)
+    {
+        var active = await db.CanonicalThemes
+            .Include(t => t.Aliases)
+            .Where(t => t.WorkspaceId == workspaceId && t.MergedIntoThemeId == null)
+            .ToListAsync(ct);
+
+        var vectors = new Dictionary<Guid, float[]>();
+        foreach (var t in active)
+        {
+            var v = VectorMath.Unpack(t.EmbeddingBlob);
+            if (v.Length == 0)
+            {
+                v = await EmbedSafeAsync($"{t.DisplayLabel} ({t.Category}): {string.Join(", ", t.Aliases.Select(a => a.NormalizedPhrase))}", ct);
+                t.EmbeddingBlob = VectorMath.Pack(v);
+                t.EmbeddingModel = embeddingProvider.ModelName;
+            }
+            vectors[t.Id] = v;
+        }
+        await db.SaveChangesAsync(ct);
+
+        var suggestions = new List<MergeSuggestionDto>();
+        for (var i = 0; i < active.Count; i++)
+        {
+            for (var j = i + 1; j < active.Count; j++)
+            {
+                var a = active[i];
+                var b = active[j];
+                var cos = VectorMath.CosineSimilarity(vectors[a.Id], vectors[b.Id]);
+                if (cos >= 0.55f)
+                {
+                    suggestions.Add(new MergeSuggestionDto(a.Id, a.DisplayLabel, b.Id, b.DisplayLabel, Math.Round(cos, 3)));
+                }
+            }
+        }
+
+        return suggestions.OrderByDescending(s => s.SimilarityScore).Take(10).ToList();
+    }
+
+    public async Task<bool> MergeThemesAsync(Guid workspaceId, IReadOnlyList<Guid> sourceThemeIds, Guid targetThemeId, CancellationToken ct)
+    {
+        var themes = await db.CanonicalThemes
+            .Include(t => t.Aliases)
+            .Where(t => t.WorkspaceId == workspaceId)
+            .ToListAsync(ct);
+
+        var target = themes.FirstOrDefault(t => t.Id == targetThemeId && t.MergedIntoThemeId == null);
+        if (target is null) return false;
+
+        var sources = themes.Where(t => sourceThemeIds.Contains(t.Id) && t.Id != targetThemeId && t.MergedIntoThemeId == null).ToList();
+        if (sources.Count == 0) return false;
+
+        var sourceIds = sources.Select(s => s.Id).ToHashSet();
+        var sourceSlugs = sources.Select(s => s.Slug).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var driversToMove = await db.FrictionDrivers
+            .Include(d => d.DecisionInsight)
+            .Where(d => d.DecisionInsight != null && d.DecisionInsight.WorkspaceId == workspaceId
+                && ((d.CanonicalThemeId.HasValue && sourceIds.Contains(d.CanonicalThemeId.Value)) || sourceSlugs.Contains(d.CanonicalTheme)))
+            .ToListAsync(ct);
+
+        foreach (var d in driversToMove)
+        {
+            d.CanonicalThemeId = target.Id;
+            d.CanonicalTheme = target.Slug;
+            d.DisplayLabel = target.DisplayLabel;
+        }
+
+        var existingTargetAliases = target.Aliases.Select(a => a.NormalizedPhrase).ToHashSet(StringComparer.Ordinal);
+        foreach (var src in sources)
+        {
+            src.MergedIntoThemeId = target.Id;
+            var srcLabelNorm = NormalizePhrase(src.DisplayLabel);
+            if (!string.IsNullOrWhiteSpace(srcLabelNorm) && existingTargetAliases.Add(srcLabelNorm))
+            {
+                db.ThemeAliases.Add(new ThemeAlias
+                {
+                    WorkspaceId = workspaceId,
+                    CanonicalThemeId = target.Id,
+                    NormalizedPhrase = srcLabelNorm,
+                    Source = "Merge"
+                });
+            }
+
+            foreach (var alias in src.Aliases.ToList())
+            {
+                if (existingTargetAliases.Add(alias.NormalizedPhrase))
+                {
+                    alias.CanonicalThemeId = target.Id;
+                }
+                else
+                {
+                    db.ThemeAliases.Remove(alias);
+                }
+            }
+        }
+
+        db.ThemeMergeAuditLogs.Add(new ThemeMergeAuditLog
+        {
+            WorkspaceId = workspaceId,
+            Action = "Merge",
+            Details = $"Merged [{string.Join(", ", sources.Select(s => s.Slug))}] into '{target.Slug}' ({driversToMove.Count} drivers updated)."
+        });
+
+        await db.SaveChangesAsync(ct);
+        return true;
+    }
+
+    public async Task<bool> RenameThemeAsync(Guid workspaceId, Guid themeId, string newLabel, DriverCategory? newCategory, CancellationToken ct)
+    {
+        var theme = await db.CanonicalThemes.FirstOrDefaultAsync(t => t.Id == themeId && t.WorkspaceId == workspaceId, ct);
+        if (theme is null || string.IsNullOrWhiteSpace(newLabel)) return false;
+
+        var oldLabel = theme.DisplayLabel;
+        theme.DisplayLabel = newLabel.Trim();
+        if (newCategory.HasValue) theme.Category = newCategory.Value;
+
+        var drivers = await db.FrictionDrivers
+            .Where(d => d.CanonicalThemeId == theme.Id || d.CanonicalTheme == theme.Slug)
+            .ToListAsync(ct);
+
+        foreach (var d in drivers)
+        {
+            d.DisplayLabel = theme.DisplayLabel;
+            if (newCategory.HasValue) d.Category = newCategory.Value;
+        }
+
+        db.ThemeMergeAuditLogs.Add(new ThemeMergeAuditLog
+        {
+            WorkspaceId = workspaceId,
+            Action = "Rename",
+            Details = $"Renamed '{oldLabel}' -> '{theme.DisplayLabel}'."
+        });
+
+        await db.SaveChangesAsync(ct);
+        return true;
+    }
+
+    private async Task<float[]> EmbedSafeAsync(string text, CancellationToken ct)
+    {
+        try
+        {
+            return await embeddingProvider.EmbedAsync(text, ct);
+        }
+        catch
+        {
+            return await fallbackEmbedder.EmbedAsync(text, ct);
+        }
     }
 
     public static string ResolveCanonicalSlugOffline(string rawSlug, string displayLabel, string rawPhrase)
@@ -200,36 +393,8 @@ public sealed partial class CanonicalTaxonomyResolver(AppDbContext db)
         return MultiSpaceRegex().Replace(input.Trim().ToLowerInvariant(), " ");
     }
 
-    private static HashSet<string> StemTokens(string text)
-    {
-        var words = NonWordRegex().Replace(text.ToLowerInvariant(), " ")
-            .Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        var set = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var w in words)
-        {
-            if (w.Length <= 2) continue;
-            var stem = w;
-            if (stem.EndsWith("ing", StringComparison.Ordinal) && stem.Length > 5) stem = stem[..^3];
-            else if (stem.EndsWith("ed", StringComparison.Ordinal) && stem.Length > 4) stem = stem[..^2];
-            else if (stem.EndsWith("s", StringComparison.Ordinal) && stem.Length > 4) stem = stem[..^1];
-            set.Add(stem);
-        }
-        return set;
-    }
-
-    private static double TokenJaccard(HashSet<string> a, HashSet<string> b)
-    {
-        if (a.Count == 0 || b.Count == 0) return 0.0;
-        var intersection = a.Count(b.Contains);
-        var union = a.Count + b.Count - intersection;
-        return union == 0 ? 0.0 : (double)intersection / union;
-    }
-
     [GeneratedRegex(@"[^a-z0-9]+", RegexOptions.Compiled)]
     private static partial Regex NonSlugRegex();
-
-    [GeneratedRegex(@"[^a-z0-9\s]", RegexOptions.Compiled)]
-    private static partial Regex NonWordRegex();
 
     [GeneratedRegex(@"\s+", RegexOptions.Compiled)]
     private static partial Regex MultiSpaceRegex();

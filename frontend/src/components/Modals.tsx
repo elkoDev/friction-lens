@@ -248,6 +248,7 @@ interface NewWorkspaceModalProps {
 
 export function NewWorkspaceModal({ onClose, onCreate }: NewWorkspaceModalProps) {
   const [name, setName] = useState('');
+  const [domainPackId, setDomainPackId] = useState('devtools-cloud');
   const [domainCategory, setDomainCategory] = useState('SaaS & Developer Tools');
   const [description, setDescription] = useState('');
   const [entitiesText, setEntitiesText] = useState('ProductA, CompetitorB, CompetitorC');
@@ -269,6 +270,7 @@ export function NewWorkspaceModal({ onClose, onCreate }: NewWorkspaceModalProps)
         name: name.trim(),
         description: description.trim(),
         domainCategory: domainCategory.trim(),
+        domainPackId,
         entities: names.map((n, idx) => ({
           name: n,
           aliasesCsv: n.toLowerCase(),
@@ -304,6 +306,21 @@ export function NewWorkspaceModal({ onClose, onCreate }: NewWorkspaceModalProps)
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
+          </div>
+          <div className="form-group">
+            <label htmlFor="ws-pack">Starter Domain Pack (seeds canonical taxonomy &amp; synonyms)</label>
+            <select
+              id="ws-pack"
+              className="select-input"
+              style={{ width: '100%', height: 38 }}
+              value={domainPackId}
+              onChange={(e) => setDomainPackId(e.target.value)}
+            >
+              <option value="devtools-cloud">DevTools &amp; Cloud Infrastructure</option>
+              <option value="prosumer-hardware">Prosumer &amp; High-Consideration Hardware</option>
+              <option value="b2b-saas">B2B SaaS &amp; Productivity</option>
+              <option value="custom-blank">Custom / Any Vertical (Blank)</option>
+            </select>
           </div>
           <div className="form-group">
             <label htmlFor="ws-domain">Domain / Industry Category</label>

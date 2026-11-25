@@ -1,17 +1,23 @@
 import type {
+  BattlecardDto,
+  CanonicalThemeDto,
   CreateWorkspacePayload,
   DeadLetterDto,
+  DomainPackDto,
+  DriverCategory,
   DriverPolarity,
   DriverSeverity,
   FrictionRankingItemDto,
   IngestionJobDto,
   InsightDetailDto,
   JobProgressEvent,
+  MergeSuggestionDto,
+  NotificationChannelDto,
   PipelineRunSummary,
   SourceConfigDto,
   SourceType,
   SystemStatusDto,
-  UsageSummaryDto,
+  TrendVelocityItemDto,
   WeeklyBriefDto,
   WinLossMatrixDto,
   WorkspaceSummaryDto,
@@ -32,6 +38,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   getStatus: () => request<SystemStatusDto>('/api/status'),
+  getDomainPacks: () => request<DomainPackDto[]>('/api/domain-packs'),
   getWorkspaces: () => request<WorkspaceSummaryDto[]>('/api/workspaces'),
   createWorkspace: (payload: CreateWorkspacePayload) =>
     request<{ id: string; slug: string }>('/api/workspaces', {
@@ -58,6 +65,8 @@ export const api = {
     const qs = polarity ? `?polarity=${polarity}` : '';
     return request<FrictionRankingItemDto[]>(`/api/workspaces/${workspaceId}/friction${qs}`);
   },
+  getTrends: (workspaceId: string) =>
+    request<TrendVelocityItemDto[]>(`/api/workspaces/${workspaceId}/trends`),
   getInsights: (workspaceId: string, entity?: string, severity?: DriverSeverity, q?: string) => {
     const params = new URLSearchParams();
     if (entity) params.set('entity', entity);
@@ -69,12 +78,45 @@ export const api = {
   getWeeklyBrief: (workspaceId: string) =>
     request<WeeklyBriefDto>(`/api/workspaces/${workspaceId}/brief`),
   getTeardownReportUrl: (workspaceId: string) => `/api/workspaces/${workspaceId}/report/html`,
+  generateBattlecard: (workspaceId: string, primaryEntity: string, competitorEntity: string) =>
+    request<BattlecardDto>(`/api/workspaces/${workspaceId}/exports/battlecard`, {
+      method: 'POST',
+      body: JSON.stringify({ primaryEntity, competitorEntity }),
+    }),
+  getThemes: (workspaceId: string) =>
+    request<CanonicalThemeDto[]>(`/api/workspaces/${workspaceId}/themes`),
+  getMergeSuggestions: (workspaceId: string) =>
+    request<MergeSuggestionDto[]>(`/api/workspaces/${workspaceId}/themes/suggestions`),
+  mergeThemes: (workspaceId: string, sourceThemeIds: string[], targetThemeId: string) =>
+    request<{ merged: boolean }>(`/api/workspaces/${workspaceId}/themes/merge`, {
+      method: 'POST',
+      body: JSON.stringify({ sourceThemeIds, targetThemeId }),
+    }),
+  renameTheme: (workspaceId: string, themeId: string, displayLabel: string, category?: DriverCategory) =>
+    request<{ renamed: boolean }>(`/api/workspaces/${workspaceId}/themes/${themeId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ displayLabel, category }),
+    }),
+  addThemeAlias: (workspaceId: string, themeId: string, phrase: string) =>
+    request<{ themeId: string; addedAlias: string }>(`/api/workspaces/${workspaceId}/themes/${themeId}/aliases`, {
+      method: 'POST',
+      body: JSON.stringify({ phrase }),
+    }),
+  getNotificationChannels: (workspaceId: string) =>
+    request<NotificationChannelDto[]>(`/api/workspaces/${workspaceId}/notifications`),
+  addNotificationChannel: (workspaceId: string, label: string, webhookUrl: string) =>
+    request<NotificationChannelDto>(`/api/workspaces/${workspaceId}/notifications`, {
+      method: 'POST',
+      body: JSON.stringify({ label, webhookUrl, channelType: 'SlackWebhook' }),
+    }),
+  sendSlackDigest: (workspaceId: string) =>
+    request<{ sent: boolean; message: string }>(`/api/workspaces/${workspaceId}/notifications/slack/digest`, {
+      method: 'POST',
+    }),
   getJobs: (workspaceId: string) =>
     request<IngestionJobDto[]>(`/api/workspaces/${workspaceId}/jobs`),
   getDeadLetters: (workspaceId: string) =>
     request<DeadLetterDto[]>(`/api/workspaces/${workspaceId}/dead-letters`),
-  getUsage: (workspaceId: string) =>
-    request<UsageSummaryDto>(`/api/workspaces/${workspaceId}/usage`),
   triggerLiveSync: (workspaceId: string, maxItemsPerSource = 20) =>
     request<IngestionJobDto>(`/api/workspaces/${workspaceId}/ingest/sync`, {
       method: 'POST',

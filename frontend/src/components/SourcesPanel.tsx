@@ -131,6 +131,8 @@ export function SourcesPanel({
             <option value="GitHub">GitHub Issues</option>
             <option value="Discourse">Discourse Forum</option>
             <option value="YouTube">YouTube API v3</option>
+            <option value="StackExchange">Stack Exchange</option>
+            <option value="AppStoreReviews">App Store Reviews</option>
           </select>
           <input
             className="text-input"

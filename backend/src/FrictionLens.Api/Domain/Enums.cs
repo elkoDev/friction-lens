@@ -9,6 +9,8 @@ public enum SourceType
     GitHub,
     Discourse,
     YouTube,
+    StackExchange,
+    AppStoreReviews,
     ManualPaste,
     CsvImport,
     JsonlImport

@@ -15,6 +15,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<FrictionDriver> FrictionDrivers => Set<FrictionDriver>();
     public DbSet<CanonicalThemeRecord> CanonicalThemes => Set<CanonicalThemeRecord>();
     public DbSet<ThemeAlias> ThemeAliases => Set<ThemeAlias>();
+    public DbSet<ThemeMergeAuditLog> ThemeMergeAuditLogs => Set<ThemeMergeAuditLog>();
+    public DbSet<NotificationChannel> NotificationChannels => Set<NotificationChannel>();
     public DbSet<IngestionJob> IngestionJobs => Set<IngestionJob>();
     public DbSet<IngestionDeadLetter> IngestionDeadLetters => Set<IngestionDeadLetter>();
     public DbSet<TakedownTombstone> TakedownTombstones => Set<TakedownTombstone>();
@@ -119,6 +121,21 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
+        modelBuilder.Entity<ThemeMergeAuditLog>(e =>
+        {
+            e.HasKey(l => l.Id);
+            e.HasIndex(l => new { l.WorkspaceId, l.OccurredAt });
+        });
+
+        modelBuilder.Entity<NotificationChannel>(e =>
+        {
+            e.HasKey(n => n.Id);
+            e.HasOne(n => n.Workspace)
+                .WithMany(w => w.NotificationChannels)
+                .HasForeignKey(n => n.WorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         modelBuilder.Entity<IngestionJob>(e =>
         {
             e.HasKey(j => j.Id);
@@ -155,7 +172,6 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             e.HasIndex(u => new { u.WorkspaceId, u.CreatedAt });
         });
 
-        // Pure UTC ticks converter on SQLite for lossless, offset-safe chronological storage while Postgres uses native timestamptz.
         if (Database.IsSqlite())
         {
             var utcTicksConverter = new ValueConverter<DateTimeOffset, long>(

@@ -3,19 +3,24 @@ import {
   Database,
   Download,
   FileText,
+  GitMerge,
   LayoutDashboard,
   Plus,
   RefreshCw,
   Search,
+  Swords,
   Upload,
 } from 'lucide-react';
 import { api } from './api/client';
 import { EvidenceStream } from './components/EvidenceStream';
 import { FrictionRanking } from './components/FrictionRanking';
 import { IngestModal, NewWorkspaceModal, WeeklyBriefModal } from './components/Modals';
+import { ReportsStudio } from './components/ReportsStudio';
 import { SourcesPanel } from './components/SourcesPanel';
+import { TaxonomyPanel } from './components/TaxonomyPanel';
 import { WinLossMatrix } from './components/WinLossMatrix';
 import type {
+  CanonicalThemeDto,
   CreateWorkspacePayload,
   DeadLetterDto,
   DriverPolarity,
@@ -24,6 +29,8 @@ import type {
   IngestionJobDto,
   InsightDetailDto,
   JobProgressEvent,
+  MergeSuggestionDto,
+  NotificationChannelDto,
   SourceType,
   SystemStatusDto,
   WeeklyBriefDto,
@@ -31,7 +38,7 @@ import type {
   WorkspaceSummaryDto,
 } from './types/api';
 
-type ActiveView = 'overview' | 'evidence' | 'sources';
+type ActiveView = 'overview' | 'evidence' | 'taxonomy' | 'sources' | 'reports';
 
 export default function App() {
   const [status, setStatus] = useState<SystemStatusDto | null>(null);
@@ -42,6 +49,9 @@ export default function App() {
   const [matrix, setMatrix] = useState<WinLossMatrixDto | null>(null);
   const [friction, setFriction] = useState<FrictionRankingItemDto[]>([]);
   const [insights, setInsights] = useState<InsightDetailDto[]>([]);
+  const [themes, setThemes] = useState<CanonicalThemeDto[]>([]);
+  const [suggestions, setSuggestions] = useState<MergeSuggestionDto[]>([]);
+  const [channels, setChannels] = useState<NotificationChannelDto[]>([]);
   const [jobs, setJobs] = useState<IngestionJobDto[]>([]);
   const [deadLetters, setDeadLetters] = useState<DeadLetterDto[]>([]);
   const [liveLogs, setLiveLogs] = useState<JobProgressEvent[]>([]);
@@ -69,16 +79,22 @@ export default function App() {
 
   const loadWorkspaceData = useCallback(async () => {
     if (!selectedId) return;
-    const [m, f, ins, j, dl] = await Promise.all([
+    const [m, f, ins, th, sug, ch, j, dl] = await Promise.all([
       api.getMatrix(selectedId),
       api.getFriction(selectedId, polarityFilter === 'All' ? undefined : polarityFilter),
       api.getInsights(selectedId, entityFilter || undefined, severityFilter || undefined, searchQuery || undefined),
+      api.getThemes(selectedId),
+      api.getMergeSuggestions(selectedId),
+      api.getNotificationChannels(selectedId),
       api.getJobs(selectedId),
       api.getDeadLetters(selectedId),
     ]);
     setMatrix(m);
     setFriction(f);
     setInsights(ins);
+    setThemes(th);
+    setSuggestions(sug);
+    setChannels(ch);
     setJobs(j);
     setDeadLetters(dl);
   }, [selectedId, polarityFilter, entityFilter, severityFilter, searchQuery]);
@@ -162,6 +178,34 @@ export default function App() {
     await loadWorkspaces(selectedId);
   }
 
+  async function handleMergeThemes(sourceIds: string[], targetId: string) {
+    if (!selectedId) return;
+    await api.mergeThemes(selectedId, sourceIds, targetId);
+    setToast('Merged canonical themes and updated drivers.');
+    await loadWorkspaceData();
+  }
+
+  async function handleAddAlias(themeId: string, phrase: string) {
+    if (!selectedId) return;
+    await api.addThemeAlias(selectedId, themeId, phrase);
+    setToast(`Added synonym alias "${phrase}".`);
+    await loadWorkspaceData();
+  }
+
+  async function handleAddSlack(label: string, webhookUrl: string) {
+    if (!selectedId) return;
+    await api.addNotificationChannel(selectedId, label, webhookUrl);
+    setToast(`Saved Slack webhook "${label}".`);
+    await loadWorkspaceData();
+  }
+
+  async function handleSendSlackDigest() {
+    if (!selectedId) return;
+    const res = await api.sendSlackDigest(selectedId);
+    setToast(res.message);
+    await loadWorkspaceData();
+  }
+
   async function handleOpenBrief() {
     if (!selectedId) return;
     const data = await api.getWeeklyBrief(selectedId);
@@ -179,7 +223,7 @@ export default function App() {
     setSeverityFilter('');
     setSearchQuery('');
     await loadWorkspaces(created.id);
-    setToast(`Created workspace "${payload.name}".`);
+    setToast(`Created workspace "${payload.name}" with Domain Pack "${payload.domainPackId}".`);
   }
 
   async function handleFeedback(insightId: string, accurate: boolean) {
@@ -207,30 +251,28 @@ export default function App() {
 
         <div className="sidebar-section-label">Workspace Views</div>
         <nav style={{ display: 'flex', flexDirection: 'column', gap: 4 }} aria-label="Primary views">
-          <button
-            type="button"
-            className={`workspace-btn ${activeView === 'overview' ? 'active' : ''}`}
-            onClick={() => setActiveView('overview')}
-            style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-          >
-            <LayoutDashboard size={14} /> <span className="workspace-btn-name" style={{ margin: 0 }}>Overview</span>
-          </button>
-          <button
-            type="button"
-            className={`workspace-btn ${activeView === 'evidence' ? 'active' : ''}`}
-            onClick={() => setActiveView('evidence')}
-            style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-          >
-            <Search size={14} /> <span className="workspace-btn-name" style={{ margin: 0 }}>Evidence Room</span>
-          </button>
-          <button
-            type="button"
-            className={`workspace-btn ${activeView === 'sources' ? 'active' : ''}`}
-            onClick={() => setActiveView('sources')}
-            style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-          >
-            <Database size={14} /> <span className="workspace-btn-name" style={{ margin: 0 }}>Sources &amp; Jobs</span>
-          </button>
+          {(
+            [
+              ['overview', 'Overview', LayoutDashboard],
+              ['evidence', 'Evidence Room', Search],
+              ['taxonomy', 'Canonical Taxonomy', GitMerge],
+              ['sources', 'Sources & Jobs', Database],
+              ['reports', 'Battlecards & Push', Swords],
+            ] as const
+          ).map(([key, label, Icon]) => (
+            <button
+              key={key}
+              type="button"
+              className={`workspace-btn ${activeView === key ? 'active' : ''}`}
+              onClick={() => setActiveView(key)}
+              style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+            >
+              <Icon size={14} />{' '}
+              <span className="workspace-btn-name" style={{ margin: 0 }}>
+                {label}
+              </span>
+            </button>
+          ))}
         </nav>
 
         <div className="sidebar-section-label">Workspaces</div>
@@ -351,11 +393,9 @@ export default function App() {
                     <div className="metric-sub">Ordered span verified</div>
                   </div>
                   <div className="metric-card">
-                    <div className="metric-label">Active Connectors</div>
-                    <div className="metric-value">{activeWorkspace.sources.filter((s) => s.enabled).length}</div>
-                    <div className="metric-sub">
-                      {activeWorkspace.sources.map((s) => s.sourceType).join(', ') || 'Manual only'}
-                    </div>
+                    <div className="metric-label">Canonical Themes</div>
+                    <div className="metric-value">{themes.length}</div>
+                    <div className="metric-sub">{suggestions.length} merge suggestion(s)</div>
                   </div>
                 </section>
 
@@ -403,6 +443,15 @@ export default function App() {
               </div>
             )}
 
+            {activeView === 'taxonomy' && (
+              <TaxonomyPanel
+                themes={themes}
+                suggestions={suggestions}
+                onMerge={handleMergeThemes}
+                onAddAlias={handleAddAlias}
+              />
+            )}
+
             {activeView === 'sources' && (
               <SourcesPanel
                 sources={activeWorkspace.sources}
@@ -412,6 +461,17 @@ export default function App() {
                 onAddSource={handleAddSource}
                 onToggleSource={handleToggleSource}
                 onDeleteSource={handleDeleteSource}
+              />
+            )}
+
+            {activeView === 'reports' && (
+              <ReportsStudio
+                entities={activeWorkspace.entities.map((e) => e.name)}
+                channels={channels}
+                teardownUrl={api.getTeardownReportUrl(activeWorkspace.id)}
+                onGenerateBattlecard={(p, c) => api.generateBattlecard(activeWorkspace.id, p, c)}
+                onAddSlackChannel={handleAddSlack}
+                onSendSlackDigest={handleSendSlackDigest}
               />
             )}
           </>

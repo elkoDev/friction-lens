@@ -4,6 +4,7 @@ using FrictionLens.Api.Data;
 using FrictionLens.Api.Domain;
 using FrictionLens.Api.Extraction;
 using FrictionLens.Api.Ingestion;
+using FrictionLens.Api.Workflows;
 using Microsoft.EntityFrameworkCore;
 
 namespace FrictionLens.Api.Endpoints;
@@ -12,10 +13,20 @@ public static partial class ApiEndpoints
 {
     public static void MapFrictionLensApi(this WebApplication app)
     {
+        // Cloud-ready liveness & readiness health probes
+        app.MapGet("/health/live", () => Results.Ok(new { status = "alive", timestamp = DateTimeOffset.UtcNow }));
+        app.MapGet("/health/ready", async (AppDbContext db, CancellationToken ct) =>
+        {
+            var canConnect = await db.Database.CanConnectAsync(ct);
+            return canConnect
+                ? Results.Ok(new { status = "ready", timestamp = DateTimeOffset.UtcNow })
+                : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        });
+
         var api = app.MapGroup("/api");
 
         // System health & active provider configuration
-        api.MapGet("/status", (IConfiguration cfg, IExtractionProvider provider) =>
+        api.MapGet("/status", (IConfiguration cfg, IExtractionProvider provider, IEmbeddingProvider embedder) =>
         {
             var dbProvider = cfg["Database:Provider"] ?? "Sqlite";
             var ollamaUrl = cfg["Extraction:OllamaBaseUrl"];
@@ -26,13 +37,17 @@ public static partial class ApiEndpoints
                 dbProvider,
                 provider.ProviderName,
                 provider.ModelName,
+                $"{embedder.ProviderName} ({embedder.ModelName})",
                 !string.IsNullOrWhiteSpace(ollamaUrl),
                 !string.IsNullOrWhiteSpace(cloudKey),
                 !string.IsNullOrWhiteSpace(ytKey),
-                "0.2.0-phase1"));
+                "0.3.0-phase2"));
         });
 
-        // List all workspaces (projected counts, no eager-loading of all insights)
+        // Out-of-the-box Generalizable Domain Packs
+        api.MapGet("/domain-packs", () => Results.Ok(DomainPackRegistry.Packs));
+
+        // List all workspaces (projected counts)
         api.MapGet("/workspaces", async (AppDbContext db, CancellationToken ct) =>
         {
             var workspaces = await db.Workspaces
@@ -67,6 +82,7 @@ public static partial class ApiEndpoints
                     w.Slug,
                     w.Description,
                     w.DomainCategory,
+                    w.DomainPackId,
                     w.CompliancePolicy,
                     w.CreatedAt,
                     counts.GetValueOrDefault(w.Id, 0),
@@ -86,14 +102,19 @@ public static partial class ApiEndpoints
             return Results.Ok(dtos);
         });
 
-        // Create a new generalizable workspace for ANY domain/category
-        api.MapPost("/workspaces", async (CreateWorkspaceRequest req, AppDbContext db, CancellationToken ct) =>
+        // Create a new generalizable workspace seeded with a chosen Domain Pack
+        api.MapPost("/workspaces", async (
+            CreateWorkspaceRequest req,
+            AppDbContext db,
+            CanonicalTaxonomyResolver taxonomyResolver,
+            CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(req.Name) || req.Entities.Count == 0)
             {
                 return Results.BadRequest(new { error = "Workspace Name and at least one TrackedEntity are required." });
             }
 
+            var pack = DomainPackRegistry.GetOrDefault(req.DomainPackId);
             var baseSlug = SlugRegex().Replace(req.Name.ToLowerInvariant().Trim(), "-").Trim('-');
             if (string.IsNullOrWhiteSpace(baseSlug)) baseSlug = "workspace";
             var slug = $"{baseSlug}-{Guid.NewGuid().ToString("N")[..6]}";
@@ -103,7 +124,8 @@ public static partial class ApiEndpoints
                 Name = req.Name.Trim(),
                 Slug = slug,
                 Description = req.Description?.Trim() ?? string.Empty,
-                DomainCategory = string.IsNullOrWhiteSpace(req.DomainCategory) ? "General" : req.DomainCategory.Trim(),
+                DomainCategory = string.IsNullOrWhiteSpace(req.DomainCategory) ? pack.DefaultDomainCategory : req.DomainCategory.Trim(),
+                DomainPackId = pack.PackId,
                 CompliancePolicy = req.CompliancePolicy,
                 Entities = req.Entities.Select(e => new TrackedEntity
                 {
@@ -120,13 +142,15 @@ public static partial class ApiEndpoints
                 }).ToList()
             };
 
+            await taxonomyResolver.SeedDomainPackThemesAsync(workspace, pack, ct);
+
             db.Workspaces.Add(workspace);
             await db.SaveChangesAsync(ct);
 
-            return Results.Created($"/api/workspaces/{workspace.Id}", new { workspace.Id, workspace.Slug });
+            return Results.Created($"/api/workspaces/{workspace.Id}", new { workspace.Id, workspace.Slug, domainPack = pack.PackId });
         });
 
-        // Add a compliant source connector to a workspace (with SSRF check for Discourse)
+        // Add a compliant source connector (with SSRF check for Discourse)
         api.MapPost("/workspaces/{workspaceId:guid}/sources", async (Guid workspaceId, AddSourceRequest req, AppDbContext db, CancellationToken ct) =>
         {
             var exists = await db.Workspaces.AnyAsync(w => w.Id == workspaceId, ct);
@@ -158,13 +182,8 @@ public static partial class ApiEndpoints
                 new SourceConfigDto(source.Id, source.SourceType, source.Label, source.Target, source.Enabled, source.LastSyncedAt));
         });
 
-        // Toggle source enabled state
         api.MapPatch("/workspaces/{workspaceId:guid}/sources/{sourceId:guid}", async (
-            Guid workspaceId,
-            Guid sourceId,
-            ToggleSourceRequest req,
-            AppDbContext db,
-            CancellationToken ct) =>
+            Guid workspaceId, Guid sourceId, ToggleSourceRequest req, AppDbContext db, CancellationToken ct) =>
         {
             var source = await db.SourceConfigs.FirstOrDefaultAsync(s => s.Id == sourceId && s.WorkspaceId == workspaceId, ct);
             if (source is null) return Results.NotFound();
@@ -174,12 +193,8 @@ public static partial class ApiEndpoints
             return Results.Ok(new SourceConfigDto(source.Id, source.SourceType, source.Label, source.Target, source.Enabled, source.LastSyncedAt));
         });
 
-        // Delete a source connector
         api.MapDelete("/workspaces/{workspaceId:guid}/sources/{sourceId:guid}", async (
-            Guid workspaceId,
-            Guid sourceId,
-            AppDbContext db,
-            CancellationToken ct) =>
+            Guid workspaceId, Guid sourceId, AppDbContext db, CancellationToken ct) =>
         {
             var source = await db.SourceConfigs.FirstOrDefaultAsync(s => s.Id == sourceId && s.WorkspaceId == workspaceId, ct);
             if (source is null) return Results.NotFound();
@@ -189,13 +204,9 @@ public static partial class ApiEndpoints
             return Results.NoContent();
         });
 
-        // Trigger async live ingestion across all enabled compliant connectors
+        // Async live sync + SSE progress stream
         api.MapPost("/workspaces/{workspaceId:guid}/ingest/sync", async (
-            Guid workspaceId,
-            TriggerIngestionRequest? req,
-            AppDbContext db,
-            IIngestionQueue queue,
-            CancellationToken ct) =>
+            Guid workspaceId, TriggerIngestionRequest? req, AppDbContext db, IIngestionQueue queue, CancellationToken ct) =>
         {
             var exists = await db.Workspaces.AnyAsync(w => w.Id == workspaceId, ct);
             if (!exists) return Results.NotFound();
@@ -210,7 +221,6 @@ public static partial class ApiEndpoints
 
             db.IngestionJobs.Add(job);
             await db.SaveChangesAsync(ct);
-
             await queue.EnqueueAsync(new IngestionWorkItem(job.Id, workspaceId, req?.MaxItemsPerSource ?? 20), ct);
 
             return Results.Accepted($"/api/workspaces/{workspaceId}/jobs/{job.Id}/events", new IngestionJobDto(
@@ -219,28 +229,15 @@ public static partial class ApiEndpoints
                 job.ErrorMessage, job.CreatedAt, job.CompletedAt));
         });
 
-        // Native .NET 11 Server-Sent Events (SSE) live progress stream for an ingestion job
         api.MapGet("/workspaces/{workspaceId:guid}/jobs/{jobId:guid}/events", (
-            Guid workspaceId,
-            Guid jobId,
-            IJobProgressBus bus,
-            CancellationToken ct) =>
-        {
-            return TypedResults.ServerSentEvents(bus.SubscribeAsync(jobId, ct), eventType: "job-progress");
-        });
+            Guid workspaceId, Guid jobId, IJobProgressBus bus, CancellationToken ct)
+            => TypedResults.ServerSentEvents(bus.SubscribeAsync(jobId, ct), eventType: "job-progress"));
 
-        // Instant manual paste ingestion
+        // Manual paste & Bulk CSV/JSONL import
         api.MapPost("/workspaces/{workspaceId:guid}/ingest/manual", async (
-            Guid workspaceId,
-            ManualIngestRequest req,
-            AppDbContext db,
-            ExtractionPipeline pipeline,
-            CancellationToken ct) =>
+            Guid workspaceId, ManualIngestRequest req, AppDbContext db, ExtractionPipeline pipeline, CancellationToken ct) =>
         {
-            var workspace = await db.Workspaces
-                .Include(w => w.Entities)
-                .FirstOrDefaultAsync(w => w.Id == workspaceId, ct);
-
+            var workspace = await db.Workspaces.Include(w => w.Entities).FirstOrDefaultAsync(w => w.Id == workspaceId, ct);
             if (workspace is null) return Results.NotFound();
             if (req.Items.Count == 0) return Results.BadRequest(new { error = "Provide at least one item to ingest." });
 
@@ -255,34 +252,21 @@ public static partial class ApiEndpoints
                     i.PublishedAt ?? DateTimeOffset.UtcNow))
                 .ToList();
 
-            var summary = await pipeline.ProcessDocumentsAsync(workspace, docs, ct);
-            return Results.Ok(summary);
+            return Results.Ok(await pipeline.ProcessDocumentsAsync(workspace, docs, ct));
         });
 
-        // Bulk CSV / JSONL first-party import with mandatory ownership attestation
         api.MapPost("/workspaces/{workspaceId:guid}/ingest/csv", async (
-            Guid workspaceId,
-            BulkCsvIngestRequest req,
-            AppDbContext db,
-            ExtractionPipeline pipeline,
-            CancellationToken ct) =>
+            Guid workspaceId, BulkCsvIngestRequest req, AppDbContext db, ExtractionPipeline pipeline, CancellationToken ct) =>
         {
             if (!req.OwnershipConfirmed)
-            {
                 return Results.UnprocessableEntity(new { error = "OwnershipConfirmed must be true to import first-party CSV/JSONL data." });
-            }
 
-            var workspace = await db.Workspaces
-                .Include(w => w.Entities)
-                .FirstOrDefaultAsync(w => w.Id == workspaceId, ct);
-
+            var workspace = await db.Workspaces.Include(w => w.Entities).FirstOrDefaultAsync(w => w.Id == workspaceId, ct);
             if (workspace is null) return Results.NotFound();
 
             var parsed = CsvJsonlImportService.Parse(req.CsvContent, req.Format, maxRows: 500);
             if (parsed.Documents.Count == 0)
-            {
                 return Results.BadRequest(new { error = "No valid rows found in CSV/JSONL payload." });
-            }
 
             db.DataImportAttestations.Add(new DataImportAttestation
             {
@@ -293,17 +277,13 @@ public static partial class ApiEndpoints
                 RowCount = parsed.Documents.Count
             });
 
-            var summary = await pipeline.ProcessDocumentsAsync(workspace, parsed.Documents, ct);
-            return Results.Ok(summary);
+            return Results.Ok(await pipeline.ProcessDocumentsAsync(workspace, parsed.Documents, ct));
         });
 
-        // List recent ingestion jobs
+        // Jobs & Dead Letters
         api.MapGet("/workspaces/{workspaceId:guid}/jobs", async (Guid workspaceId, AppDbContext db, CancellationToken ct) =>
         {
-            var jobs = (await db.IngestionJobs
-                .AsNoTracking()
-                .Where(j => j.WorkspaceId == workspaceId)
-                .ToListAsync(ct))
+            var jobs = (await db.IngestionJobs.AsNoTracking().Where(j => j.WorkspaceId == workspaceId).ToListAsync(ct))
                 .OrderByDescending(j => j.CreatedAt)
                 .Take(15)
                 .Select(j => new IngestionJobDto(
@@ -311,59 +291,30 @@ public static partial class ApiEndpoints
                     j.DocumentsFetched, j.DocumentsPassedFilter, j.InsightsExtracted,
                     j.ErrorMessage, j.CreatedAt, j.CompletedAt))
                 .ToList();
-
             return Results.Ok(jobs);
         });
 
-        // List dead-letter errors for a workspace
         api.MapGet("/workspaces/{workspaceId:guid}/dead-letters", async (Guid workspaceId, AppDbContext db, CancellationToken ct) =>
         {
-            var items = (await db.IngestionDeadLetters
-                .AsNoTracking()
-                .Where(d => d.WorkspaceId == workspaceId)
-                .ToListAsync(ct))
+            var items = (await db.IngestionDeadLetters.AsNoTracking().Where(d => d.WorkspaceId == workspaceId).ToListAsync(ct))
                 .OrderByDescending(d => d.OccurredAt)
                 .Take(25)
                 .Select(d => new DeadLetterDto(d.Id, d.SourceType, d.Stage, d.ExternalId, d.ErrorMessage, d.OccurredAt))
                 .ToList();
-
             return Results.Ok(items);
         });
 
-        // List extracted insights with verbatim evidence, search, and grounding/quarantine filter
+        // Evidence Room
         api.MapGet("/workspaces/{workspaceId:guid}/insights", async (
-            Guid workspaceId,
-            string? entity,
-            DriverSeverity? severity,
-            string? q,
-            bool? includeQuarantined,
-            AppDbContext db,
-            CancellationToken ct) =>
+            Guid workspaceId, string? entity, DriverSeverity? severity, string? q, bool? includeQuarantined,
+            AppDbContext db, CancellationToken ct) =>
         {
-            var query = db.DecisionInsights
-                .AsNoTracking()
-                .Include(i => i.Drivers)
-                .Where(i => i.WorkspaceId == workspaceId);
+            var query = db.DecisionInsights.AsNoTracking().Include(i => i.Drivers).Where(i => i.WorkspaceId == workspaceId);
+            if (includeQuarantined != true) query = query.Where(i => i.GroundingVerified && !i.IsQuarantined);
+            if (!string.IsNullOrWhiteSpace(entity)) query = query.Where(i => i.PrimaryEntity == entity || i.CompetitorsComparedCsv.Contains(entity));
+            if (severity.HasValue) query = query.Where(i => i.Drivers.Any(d => d.Severity == severity.Value));
 
-            if (includeQuarantined != true)
-            {
-                query = query.Where(i => i.GroundingVerified && !i.IsQuarantined);
-            }
-
-            if (!string.IsNullOrWhiteSpace(entity))
-            {
-                query = query.Where(i => i.PrimaryEntity == entity || i.CompetitorsComparedCsv.Contains(entity));
-            }
-
-            if (severity.HasValue)
-            {
-                query = query.Where(i => i.Drivers.Any(d => d.Severity == severity.Value));
-            }
-
-            var insights = (await query.ToListAsync(ct))
-                .OrderByDescending(i => i.ObservedAt)
-                .AsEnumerable();
-
+            var insights = (await query.ToListAsync(ct)).OrderByDescending(i => i.ObservedAt).AsEnumerable();
             if (!string.IsNullOrWhiteSpace(q))
             {
                 var term = q.Trim();
@@ -375,84 +326,66 @@ public static partial class ApiEndpoints
                         || d.CanonicalTheme.Contains(term, StringComparison.OrdinalIgnoreCase)));
             }
 
-            var dtos = insights.Take(100).Select(i => new InsightDetailDto(
-                i.Id,
-                i.SourceType,
-                i.SourceUrl,
-                i.SourceTitle,
-                i.ObservedAt,
-                i.PrimaryEntity,
+            return Results.Ok(insights.Take(100).Select(i => new InsightDetailDto(
+                i.Id, i.SourceType, i.SourceUrl, i.SourceTitle, i.ObservedAt, i.PrimaryEntity,
                 i.CompetitorsComparedCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
-                i.Outcome,
-                i.Summary,
-                i.UnmetRequirement,
-                i.VerbatimEvidence,
-                i.GroundingVerified,
-                i.GroundingScore,
-                i.GroundingTier,
-                i.IsQuarantined,
-                i.Confidence,
-                i.ExtractorModel,
+                i.Outcome, i.Summary, i.UnmetRequirement, i.VerbatimEvidence, i.GroundingVerified,
+                i.GroundingScore, i.GroundingTier, i.IsQuarantined, i.Confidence, i.ExtractorModel,
                 i.UserVerifiedAccurate,
                 i.Drivers.Select(d => new FrictionDriverDto(
                     d.Id, d.TargetEntity, d.Category, d.CanonicalTheme,
-                    d.DisplayLabel, d.RawPhrase, d.Severity, d.Polarity)).ToList()))
-                .ToList();
-
-            return Results.Ok(dtos);
+                    d.DisplayLabel, d.RawPhrase, d.Severity, d.Polarity)).ToList())).ToList());
         });
 
-        // Human-in-the-loop precision feedback flag
         api.MapPatch("/insights/{insightId:guid}/feedback", async (
-            Guid insightId,
-            FeedbackFlagRequest req,
-            AppDbContext db,
-            CancellationToken ct) =>
+            Guid insightId, FeedbackFlagRequest req, AppDbContext db, CancellationToken ct) =>
         {
             var insight = await db.DecisionInsights.FirstOrDefaultAsync(i => i.Id == insightId, ct);
             if (insight is null) return Results.NotFound();
-
             insight.UserVerifiedAccurate = req.Accurate;
             await db.SaveChangesAsync(ct);
             return Results.Ok(new { insight.Id, insight.UserVerifiedAccurate });
         });
 
-        // Head-to-head Win/Loss Matrix
+        // Analytics: Matrix, Friction, Trends, Brief, Teardown HTML, Sales Battlecard
         api.MapGet("/workspaces/{workspaceId:guid}/matrix", async (Guid workspaceId, IntelligenceService intel, CancellationToken ct) =>
         {
             var matrix = await intel.BuildWinLossMatrixAsync(workspaceId, ct);
             return matrix is null ? Results.NotFound() : Results.Ok(matrix);
         });
 
-        // Ranked Friction Drivers & Advantages
         api.MapGet("/workspaces/{workspaceId:guid}/friction", async (
-            Guid workspaceId,
-            DriverPolarity? polarity,
-            IntelligenceService intel,
-            CancellationToken ct) =>
-        {
-            var ranking = await intel.GetFrictionRankingAsync(workspaceId, polarity, ct);
-            return Results.Ok(ranking);
-        });
+            Guid workspaceId, DriverPolarity? polarity, IntelligenceService intel, CancellationToken ct)
+            => Results.Ok(await intel.GetFrictionRankingAsync(workspaceId, polarity, ct)));
 
-        // Auto-generated Weekly Intelligence Brief (Markdown)
+        api.MapGet("/workspaces/{workspaceId:guid}/trends", async (
+            Guid workspaceId, TrendVelocityService trends, CancellationToken ct)
+            => Results.Ok(await trends.ComputeVelocityAsync(workspaceId, ct)));
+
         api.MapGet("/workspaces/{workspaceId:guid}/brief", async (Guid workspaceId, IntelligenceService intel, CancellationToken ct) =>
         {
             var brief = await intel.GenerateWeeklyBriefAsync(workspaceId, ct);
             return brief is null ? Results.NotFound() : Results.Ok(brief);
         });
 
-        // Standalone Print-to-PDF-Ready Trojan Horse Executive Teardown Report (HTML)
         api.MapGet("/workspaces/{workspaceId:guid}/report/html", async (
-            Guid workspaceId,
-            TeardownReportBuilder builder,
-            CancellationToken ct) =>
+            Guid workspaceId, TeardownReportBuilder builder, CancellationToken ct) =>
         {
             var html = await builder.BuildHtmlReportAsync(workspaceId, ct);
             return html is null ? Results.NotFound() : Results.Content(html, "text/html; charset=utf-8");
         });
 
-        // Canonical Themes & Alias Management
+        api.MapPost("/workspaces/{workspaceId:guid}/exports/battlecard", async (
+            Guid workspaceId, BattlecardRequest req, BattlecardBuilder builder, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.PrimaryEntity) || string.IsNullOrWhiteSpace(req.CompetitorEntity))
+                return Results.BadRequest(new { error = "PrimaryEntity and CompetitorEntity are required." });
+
+            var card = await builder.BuildAsync(workspaceId, req.PrimaryEntity.Trim(), req.CompetitorEntity.Trim(), ct);
+            return card is null ? Results.NotFound() : Results.Ok(card);
+        });
+
+        // Phase 2 Canonical Taxonomy Management (List, Suggestions, Alias, Rename, Merge)
         api.MapGet("/workspaces/{workspaceId:guid}/themes", async (Guid workspaceId, AppDbContext db, CancellationToken ct) =>
         {
             var themes = await db.CanonicalThemes
@@ -461,20 +394,43 @@ public static partial class ApiEndpoints
                 .Where(t => t.WorkspaceId == workspaceId && t.MergedIntoThemeId == null)
                 .ToListAsync(ct);
 
-            var dtos = themes
-                .OrderBy(t => t.DisplayLabel)
-                .Select(t => new CanonicalThemeDto(t.Id, t.Slug, t.DisplayLabel, t.Category, t.Aliases.Select(a => a.NormalizedPhrase).ToList()))
-                .ToList();
+            var driverCounts = await db.FrictionDrivers
+                .AsNoTracking()
+                .Where(d => d.DecisionInsight != null && d.DecisionInsight.WorkspaceId == workspaceId)
+                .GroupBy(d => d.CanonicalTheme)
+                .Select(g => new { Slug = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Slug, x => x.Count, ct);
 
-            return Results.Ok(dtos);
+            return Results.Ok(themes
+                .OrderByDescending(t => driverCounts.GetValueOrDefault(t.Slug, 0))
+                .ThenBy(t => t.DisplayLabel)
+                .Select(t => new CanonicalThemeDto(
+                    t.Id, t.Slug, t.DisplayLabel, t.Category,
+                    driverCounts.GetValueOrDefault(t.Slug, 0),
+                    t.Aliases.Select(a => a.NormalizedPhrase).ToList()))
+                .ToList());
+        });
+
+        api.MapGet("/workspaces/{workspaceId:guid}/themes/suggestions", async (
+            Guid workspaceId, CanonicalTaxonomyResolver resolver, CancellationToken ct)
+            => Results.Ok(await resolver.FindMergeSuggestionsAsync(workspaceId, ct)));
+
+        api.MapPost("/workspaces/{workspaceId:guid}/themes/merge", async (
+            Guid workspaceId, MergeThemesRequest req, CanonicalTaxonomyResolver resolver, CancellationToken ct) =>
+        {
+            var ok = await resolver.MergeThemesAsync(workspaceId, req.SourceThemeIds, req.TargetThemeId, ct);
+            return ok ? Results.Ok(new { merged = true, targetThemeId = req.TargetThemeId }) : Results.BadRequest(new { error = "Invalid source or target theme IDs." });
+        });
+
+        api.MapPatch("/workspaces/{workspaceId:guid}/themes/{themeId:guid}", async (
+            Guid workspaceId, Guid themeId, RenameThemeRequest req, CanonicalTaxonomyResolver resolver, CancellationToken ct) =>
+        {
+            var ok = await resolver.RenameThemeAsync(workspaceId, themeId, req.DisplayLabel, req.Category, ct);
+            return ok ? Results.Ok(new { renamed = true, themeId }) : Results.NotFound();
         });
 
         api.MapPost("/workspaces/{workspaceId:guid}/themes/{themeId:guid}/aliases", async (
-            Guid workspaceId,
-            Guid themeId,
-            AddAliasRequest req,
-            AppDbContext db,
-            CancellationToken ct) =>
+            Guid workspaceId, Guid themeId, AddAliasRequest req, AppDbContext db, CancellationToken ct) =>
         {
             var theme = await db.CanonicalThemes.Include(t => t.Aliases).FirstOrDefaultAsync(t => t.Id == themeId && t.WorkspaceId == workspaceId, ct);
             if (theme is null) return Results.NotFound();
@@ -497,14 +453,48 @@ public static partial class ApiEndpoints
             return Results.Ok(new { themeId, addedAlias = norm });
         });
 
-        // Compliance Right-to-Erasure & Takedown Tombstone Endpoint
+        // Slack / Push Notification Channels
+        api.MapGet("/workspaces/{workspaceId:guid}/notifications", async (Guid workspaceId, AppDbContext db, CancellationToken ct) =>
+        {
+            var channels = await db.NotificationChannels.AsNoTracking().Where(c => c.WorkspaceId == workspaceId).ToListAsync(ct);
+            return Results.Ok(channels.Select(c => new NotificationChannelDto(
+                c.Id, c.ChannelType, c.Label, MaskUrl(c.WebhookUrl), c.Enabled, c.LastDeliveredAt)).ToList());
+        });
+
+        api.MapPost("/workspaces/{workspaceId:guid}/notifications", async (
+            Guid workspaceId, CreateNotificationChannelRequest req, AppDbContext db, CancellationToken ct) =>
+        {
+            var (allowed, reason, _) = await SsrfGuard.ValidateExternalUrlAsync(req.WebhookUrl, ct);
+            if (!allowed) return Results.BadRequest(new { error = $"Webhook URL rejected: {reason}" });
+
+            var ch = new NotificationChannel
+            {
+                WorkspaceId = workspaceId,
+                ChannelType = string.IsNullOrWhiteSpace(req.ChannelType) ? "SlackWebhook" : req.ChannelType.Trim(),
+                Label = req.Label.Trim(),
+                WebhookUrl = req.WebhookUrl.Trim(),
+                Enabled = true
+            };
+            db.NotificationChannels.Add(ch);
+            await db.SaveChangesAsync(ct);
+
+            return Results.Created($"/api/workspaces/{workspaceId}/notifications/{ch.Id}",
+                new NotificationChannelDto(ch.Id, ch.ChannelType, ch.Label, MaskUrl(ch.WebhookUrl), ch.Enabled, ch.LastDeliveredAt));
+        });
+
+        api.MapPost("/workspaces/{workspaceId:guid}/notifications/slack/digest", async (
+            Guid workspaceId, SlackWebhookService slack, CancellationToken ct) =>
+        {
+            var (sent, msg) = await slack.SendWeeklyDigestAsync(workspaceId, null, ct);
+            return sent ? Results.Ok(new { sent, message = msg }) : Results.BadRequest(new { sent, message = msg });
+        });
+
+        // Compliance Takedown Tombstone
         api.MapPost("/compliance/takedowns", async (TakedownRequest req, AppDbContext db, CancellationToken ct) =>
         {
             var urlHash = ExtractionPipeline.ComputeNormalizedUrlHash(req.SourceUrl);
             if (string.IsNullOrEmpty(urlHash) && string.IsNullOrWhiteSpace(req.ExternalId) && req.RawDocumentId is null)
-            {
                 return Results.BadRequest(new { error = "Provide SourceUrl, ExternalId, or RawDocumentId." });
-            }
 
             var docsQuery = db.RawDocuments.AsQueryable();
             if (req.WorkspaceId.HasValue) docsQuery = docsQuery.Where(d => d.WorkspaceId == req.WorkspaceId.Value);
@@ -544,14 +534,9 @@ public static partial class ApiEndpoints
             return Results.Ok(new TakedownResponse(tombstone.Id, matchingDocs.Count, matchingInsights.Count));
         });
 
-        // LLM Token & Cost Usage Ledger Summary
         api.MapGet("/workspaces/{workspaceId:guid}/usage", async (Guid workspaceId, AppDbContext db, CancellationToken ct) =>
         {
-            var entries = await db.UsageLedger
-                .AsNoTracking()
-                .Where(u => u.WorkspaceId == workspaceId)
-                .ToListAsync(ct);
-
+            var entries = await db.UsageLedger.AsNoTracking().Where(u => u.WorkspaceId == workspaceId).ToListAsync(ct);
             return Results.Ok(new UsageSummaryDto(
                 entries.Count,
                 entries.Sum(e => (long)e.PromptTokens),
@@ -559,6 +544,9 @@ public static partial class ApiEndpoints
                 entries.Sum(e => e.EstimatedCostUsd)));
         });
     }
+
+    private static string MaskUrl(string url)
+        => url.Length <= 28 ? url : $"{url[..24]}...{url[^4..]}";
 
     [GeneratedRegex(@"[^a-z0-9]+", RegexOptions.Compiled)]
     private static partial Regex SlugRegex();

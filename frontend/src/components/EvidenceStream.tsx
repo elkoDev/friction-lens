@@ -142,6 +142,16 @@ export function EvidenceStream({
                       Source <ExternalLink size={12} />
                     </a>
                   )}
+                  <a
+                    href={`https://linear.new?title=${encodeURIComponent(`[FrictionLens] ${ins.primaryEntity}: ${ins.drivers[0]?.displayLabel ?? ins.outcome}`)}&description=${encodeURIComponent(`## Unmet Requirement\n${ins.unmetRequirement || 'See quote below'}\n\n## Grounded Verbatim Evidence\n> "${ins.verbatimEvidence}"\n\nSource: ${ins.sourceUrl || ins.sourceType}`)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="tiny-btn"
+                    style={{ textDecoration: 'none' }}
+                    title="Open pre-filled Linear issue with grounded quote"
+                  >
+                    + Linear Issue
+                  </a>
                 </div>
 
                 <div className="feedback-btns">

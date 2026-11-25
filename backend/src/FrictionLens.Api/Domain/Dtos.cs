@@ -18,6 +18,7 @@ public sealed record WorkspaceSummaryDto(
     string Slug,
     string Description,
     string DomainCategory,
+    string DomainPackId,
     CompliancePolicy CompliancePolicy,
     DateTimeOffset CreatedAt,
     int InsightCount,
@@ -34,7 +35,8 @@ public sealed record CreateWorkspaceRequest(
     string DomainCategory,
     IReadOnlyList<CreateEntityInput> Entities,
     IReadOnlyList<CreateSourceInput>? Sources,
-    CompliancePolicy CompliancePolicy = CompliancePolicy.StandardPublic);
+    CompliancePolicy CompliancePolicy = CompliancePolicy.StandardPublic,
+    string DomainPackId = "custom-blank");
 
 public sealed record AddSourceRequest(SourceType SourceType, string Label, string Target);
 public sealed record ToggleSourceRequest(bool Enabled);
@@ -122,6 +124,31 @@ public sealed record WeeklyBriefDto(
     int InsightsAnalyzed,
     string MarkdownContent);
 
+public sealed record BattlecardRequest(
+    string PrimaryEntity,
+    string CompetitorEntity);
+
+public sealed record BattlecardDto(
+    Guid WorkspaceId,
+    string PrimaryEntity,
+    string CompetitorEntity,
+    int HeadToHeadCount,
+    IReadOnlyList<string> WhyWeWin,
+    IReadOnlyList<string> KnownGapsAndObjections,
+    IReadOnlyList<string> LandminesToPlant,
+    string MarkdownContent,
+    DateTimeOffset GeneratedAt);
+
+public sealed record TrendVelocityItemDto(
+    string CanonicalTheme,
+    string DisplayLabel,
+    string TargetEntity,
+    int CurrentWindowCount,
+    int PreviousWindowCount,
+    double VelocityPct,
+    bool IsSpike,
+    IReadOnlyList<int> WeeklySparkline);
+
 public sealed record IngestionJobDto(
     Guid Id,
     JobStatus Status,
@@ -172,9 +199,41 @@ public sealed record CanonicalThemeDto(
     string Slug,
     string DisplayLabel,
     DriverCategory Category,
+    int DriverCount,
     IReadOnlyList<string> Aliases);
 
 public sealed record AddAliasRequest(string Phrase);
+public sealed record RenameThemeRequest(string DisplayLabel, DriverCategory? Category);
+public sealed record MergeThemesRequest(IReadOnlyList<Guid> SourceThemeIds, Guid TargetThemeId);
+public sealed record MergeSuggestionDto(
+    Guid ThemeAId,
+    string ThemeALabel,
+    Guid ThemeBId,
+    string ThemeBLabel,
+    double SimilarityScore);
+
+public sealed record DomainPackSeedTheme(
+    string Slug,
+    string DisplayLabel,
+    DriverCategory Category,
+    IReadOnlyList<string> Synonyms);
+
+public sealed record DomainPackDto(
+    string PackId,
+    string DisplayName,
+    string Description,
+    string DefaultDomainCategory,
+    IReadOnlyList<DomainPackSeedTheme> SeedThemes);
+
+public sealed record NotificationChannelDto(
+    Guid Id,
+    string ChannelType,
+    string Label,
+    string WebhookUrlMasked,
+    bool Enabled,
+    DateTimeOffset? LastDeliveredAt);
+
+public sealed record CreateNotificationChannelRequest(string Label, string WebhookUrl, string ChannelType = "SlackWebhook");
 
 public sealed record UsageSummaryDto(
     int TotalCalls,
@@ -186,6 +245,7 @@ public sealed record SystemStatusDto(
     string DatabaseProvider,
     string ExtractionProvider,
     string ExtractionModel,
+    string EmbeddingProvider,
     bool OllamaConfigured,
     bool CloudLlmConfigured,
     bool YouTubeConfigured,

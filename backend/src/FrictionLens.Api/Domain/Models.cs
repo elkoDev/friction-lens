@@ -7,6 +7,7 @@ public sealed class Workspace
     public required string Slug { get; set; }
     public string Description { get; set; } = string.Empty;
     public string DomainCategory { get; set; } = "General";
+    public string DomainPackId { get; set; } = "custom-blank";
     public CompliancePolicy CompliancePolicy { get; set; } = CompliancePolicy.StandardPublic;
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
@@ -16,6 +17,7 @@ public sealed class Workspace
     public List<DecisionInsight> Insights { get; set; } = [];
     public List<IngestionJob> Jobs { get; set; } = [];
     public List<CanonicalThemeRecord> CanonicalThemes { get; set; } = [];
+    public List<NotificationChannel> NotificationChannels { get; set; } = [];
 }
 
 public sealed class TrackedEntity
@@ -157,6 +159,9 @@ public sealed class CanonicalThemeRecord
     public required string DisplayLabel { get; set; }
     public DriverCategory Category { get; set; }
     public Guid? MergedIntoThemeId { get; set; }
+    /// <summary>Packed float32 embedding vector (portable across SQLite BLOB and Postgres bytea/pgvector).</summary>
+    public byte[]? EmbeddingBlob { get; set; }
+    public string? EmbeddingModel { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     public List<ThemeAlias> Aliases { get; set; } = [];
@@ -171,6 +176,29 @@ public sealed class ThemeAlias
 
     public required string NormalizedPhrase { get; set; }
     public string Source { get; set; } = "Seed";
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class ThemeMergeAuditLog
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid WorkspaceId { get; set; }
+    public required string Action { get; set; }
+    public string Details { get; set; } = string.Empty;
+    public DateTimeOffset OccurredAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class NotificationChannel
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid WorkspaceId { get; set; }
+    public Workspace? Workspace { get; set; }
+
+    public string ChannelType { get; set; } = "SlackWebhook";
+    public required string Label { get; set; }
+    public required string WebhookUrl { get; set; }
+    public bool Enabled { get; set; } = true;
+    public DateTimeOffset? LastDeliveredAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 

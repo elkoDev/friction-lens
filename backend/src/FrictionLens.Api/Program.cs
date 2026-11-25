@@ -1,9 +1,11 @@
+using System.Net;
 using System.Text.Json.Serialization;
 using FrictionLens.Api.Analytics;
 using FrictionLens.Api.Data;
 using FrictionLens.Api.Endpoints;
 using FrictionLens.Api.Extraction;
 using FrictionLens.Api.Ingestion;
+using FrictionLens.Api.Workflows;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -46,7 +48,16 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.AddHttpClient("IngestionClient", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(20);
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("FrictionLens-MVP/0.2 (+https://github.com/elkoDev/friction-lens)");
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("FrictionLens/0.3 (+https://github.com/elkoDev/friction-lens)");
+});
+
+builder.Services.AddHttpClient("GzipIngestionClient", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(20);
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("FrictionLens/0.3 (+https://github.com/elkoDev/friction-lens)");
+}).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
 });
 
 builder.Services.AddHttpClient("LlmClient", client =>
@@ -54,12 +65,30 @@ builder.Services.AddHttpClient("LlmClient", client =>
     client.Timeout = TimeSpan.FromSeconds(90);
 });
 
-// Rate Limiter & Compliant Connectors
+// Rate Limiter & Compliant Connectors (Phase 1 + Phase 2)
 builder.Services.AddSingleton<ConnectorRateLimiter>();
 builder.Services.AddScoped<ISourceConnector, HackerNewsConnector>();
 builder.Services.AddScoped<ISourceConnector, GitHubConnector>();
 builder.Services.AddScoped<ISourceConnector, DiscourseConnector>();
 builder.Services.AddScoped<ISourceConnector, YouTubeConnector>();
+builder.Services.AddScoped<ISourceConnector, StackExchangeConnector>();
+builder.Services.AddScoped<ISourceConnector, AppStoreReviewConnector>();
+
+// Pluggable Embedding Providers (LocalHash $0 | Ollama nomic-embed-text | OpenAiCompatible)
+builder.Services.AddSingleton<HashEmbeddingProvider>();
+builder.Services.AddScoped<OllamaEmbeddingProvider>();
+builder.Services.AddScoped<OpenAiCompatibleEmbeddingProvider>();
+builder.Services.AddScoped<IEmbeddingProvider>(sp =>
+{
+    var cfg = sp.GetRequiredService<IConfiguration>();
+    var mode = cfg["Embedding:Provider"] ?? "LocalHash";
+    return mode.ToLowerInvariant() switch
+    {
+        "ollama" => sp.GetRequiredService<OllamaEmbeddingProvider>(),
+        "openaicompatible" or "openai" or "cloud" => sp.GetRequiredService<OpenAiCompatibleEmbeddingProvider>(),
+        _ => sp.GetRequiredService<HashEmbeddingProvider>()
+    };
+});
 
 // Pluggable Extraction Providers + Canonical Taxonomy Resolver
 builder.Services.AddSingleton<HeuristicExtractionProvider>();
@@ -82,6 +111,9 @@ builder.Services.AddScoped<IExtractionProvider>(sp =>
 builder.Services.AddScoped<ExtractionPipeline>();
 builder.Services.AddScoped<IntelligenceService>();
 builder.Services.AddScoped<TeardownReportBuilder>();
+builder.Services.AddScoped<BattlecardBuilder>();
+builder.Services.AddScoped<TrendVelocityService>();
+builder.Services.AddScoped<SlackWebhookService>();
 
 // Background Ingestion Worker + SSE Progress Bus
 builder.Services.AddSingleton<IIngestionQueue, IngestionQueue>();
@@ -97,6 +129,13 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
+// Serve built React SPA when deployed as a single cloud container (Dockerfile)
+if (Directory.Exists(Path.Combine(app.Environment.ContentRootPath, "wwwroot")))
+{
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
+}
+
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -105,6 +144,11 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.MapFrictionLensApi();
+
+if (Directory.Exists(Path.Combine(app.Environment.ContentRootPath, "wwwroot")))
+{
+    app.MapFallbackToFile("index.html");
+}
 
 app.Run();
 
